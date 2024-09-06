@@ -8,18 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
-
-	"github.com/zarf-dev/zarf/src/cmd/common"
-	"github.com/zarf-dev/zarf/src/config/lang"
-	"github.com/zarf-dev/zarf/src/pkg/lint"
-	"github.com/zarf-dev/zarf/src/pkg/message"
-	"github.com/zarf-dev/zarf/src/pkg/packager/sources"
-	"github.com/zarf-dev/zarf/src/types"
-
-	"oras.land/oras-go/v2/registry"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/defenseunicorns/pkg/helpers/v2"
@@ -28,6 +21,17 @@ import (
 	"github.com/zarf-dev/zarf/src/config"
 	"github.com/zarf-dev/zarf/src/pkg/cluster"
 	"github.com/zarf-dev/zarf/src/pkg/packager"
+	"oras.land/oras-go/v2/registry"
+
+	"github.com/zarf-dev/zarf/src/cmd/common"
+	"github.com/zarf-dev/zarf/src/config/lang"
+	"github.com/zarf-dev/zarf/src/internal/dns"
+	"github.com/zarf-dev/zarf/src/internal/packager2"
+	"github.com/zarf-dev/zarf/src/pkg/lint"
+	"github.com/zarf-dev/zarf/src/pkg/message"
+	"github.com/zarf-dev/zarf/src/pkg/packager/filters"
+	"github.com/zarf-dev/zarf/src/pkg/packager/sources"
+	"github.com/zarf-dev/zarf/src/types"
 )
 
 var packageCmd = &cobra.Command{
@@ -113,18 +117,30 @@ var packageMirrorCmd = &cobra.Command{
 	Example: lang.CmdPackageMirrorExample,
 	Args:    cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		packageSource, err := choosePackage(args)
+		var c *cluster.Cluster
+		if dns.IsServiceURL(pkgConfig.InitOpts.RegistryInfo.Address) || dns.IsServiceURL(pkgConfig.InitOpts.GitServer.Address) {
+			var err error
+			c, err = cluster.NewCluster()
+			if err != nil {
+				return err
+			}
+		}
+		src, err := choosePackage(args)
 		if err != nil {
 			return err
 		}
-		pkgConfig.PkgOpts.PackageSource = packageSource
-		pkgClient, err := packager.New(&pkgConfig)
+		filter := filters.Combine(
+			filters.ByLocalOS(runtime.GOOS),
+			filters.BySelectState(pkgConfig.PkgOpts.OptionalComponents),
+		)
+		pkgPaths, err := packager2.LoadPackageFromSource(cmd.Context(), src, pkgConfig.PkgOpts.Shasum, pkgConfig.PkgOpts.PublicKeyPath, filter)
 		if err != nil {
 			return err
 		}
-		defer pkgClient.ClearTempPaths()
-		if err := pkgClient.Mirror(cmd.Context()); err != nil {
-			return fmt.Errorf("failed to mirror package: %w", err)
+		defer os.Remove(pkgPaths.Base)
+		err = packager2.Mirror(cmd.Context(), c, *pkgPaths, filter, pkgConfig.InitOpts.RegistryInfo, pkgConfig.InitOpts.GitServer, pkgConfig.MirrorOpts.NoImgChecksum, pkgConfig.PkgOpts.Retries)
+		if err != nil {
+			return err
 		}
 		return nil
 	},
